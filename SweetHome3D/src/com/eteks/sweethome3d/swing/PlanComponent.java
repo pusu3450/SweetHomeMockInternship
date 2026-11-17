@@ -1941,22 +1941,25 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
    * to make it fill <code>pageFormat</code> imageable size.
    */
   public float getPrintPreferredScale(Graphics g, PageFormat pageFormat) {
-    List<Selectable> printedItems = getPaintedItems(); 
-    Rectangle2D printedItemBounds = getItemsBounds(g, printedItems);
-    if (printedItemBounds != null) {
-      float imageableWidthCm = LengthUnit.inchToCentimeter((float)pageFormat.getImageableWidth() / 72);
-      float imageableHeightCm = LengthUnit.inchToCentimeter((float)pageFormat.getImageableHeight() / 72);
-      float extraMargin = getStrokeWidthExtraMargin(printedItems, PaintMode.PRINT);
-      // Compute the largest integer scale possible
-      int scaleInverse = (int)Math.ceil(Math.max(
-          (printedItemBounds.getWidth() + 2 * extraMargin) / imageableWidthCm,
-          (printedItemBounds.getHeight() + 2 * extraMargin) / imageableHeightCm));
-      return 1f / scaleInverse;
-    } else {
+    List<Selectable> printedItems = getPaintedItems();
+    return getPrintPreferredScale(pageFormat, printedItems, getItemsBounds(g, printedItems));
+  }
+
+  private float getPrintPreferredScale(PageFormat pageFormat, List<Selectable> printedItems,
+                                       Rectangle2D printedItemBounds) {
+    if (printedItemBounds == null) {
       return 0;
     }
+    float imageableWidthCm = LengthUnit.inchToCentimeter((float)pageFormat.getImageableWidth() / 72);
+    float imageableHeightCm = LengthUnit.inchToCentimeter((float)pageFormat.getImageableHeight() / 72);
+    float extraMargin = getStrokeWidthExtraMargin(printedItems, PaintMode.PRINT);
+    // Compute the largest integer scale possible
+    int scaleInverse = (int)Math.ceil(Math.max(
+        (printedItemBounds.getWidth() + 2 * extraMargin) / imageableWidthCm,
+        (printedItemBounds.getHeight() + 2 * extraMargin) / imageableHeightCm));
+    return 1f / scaleInverse;
   }
-  
+
   /**
    * Returns the margin that should be added around home items bounds to ensure their
    * line stroke width is always fully visible.
@@ -2008,7 +2011,45 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
    * that makes it fill <code>pageFormat</code> imageable size if this attribute is <code>null</code>.
    */
   public int print(Graphics g, PageFormat pageFormat, int pageIndex) {
-    List<Selectable> printedItems = getPaintedItems(); 
+    if (pageIndex < 0) {
+      return NO_SUCH_PAGE;
+    }
+    if (this.home.getLevels().isEmpty()) {
+      return printSelectedLevel(g, pageFormat, pageIndex, false);
+    }
+    Level level = getPrintLevel(this.home, pageIndex);
+    if (level == null) {
+      return NO_SUCH_PAGE;
+    }
+
+    Level selectedLevel = this.home.getSelectedLevel();
+    List<Selectable> selectedItems = this.home.getSelectedItems();
+    try {
+      this.home.setSelectedLevel(level);
+      return printSelectedLevel(g, pageFormat, 0, true);
+    } finally {
+      this.home.setSelectedLevel(selectedLevel);
+      if (!this.home.getSelectedItems().equals(selectedItems)) {
+        this.home.setSelectedItems(selectedItems);
+      }
+    }
+  }
+
+  static Level getPrintLevel(Home home, int pageIndex) {
+    for (Level level : home.getLevels()) {
+      if (level.isViewable() && pageIndex-- == 0) {
+        return level;
+      }
+    }
+    return null;
+  }
+
+  private int printSelectedLevel(Graphics g, PageFormat pageFormat, int pageIndex, boolean fitOnPage) {
+    List<Selectable> printedItems = getPaintedItems();
+    if (fitOnPage) {
+      printedItems.removeIf(item -> item instanceof Elevatable
+          && !isViewableAtSelectedLevel((Elevatable)item));
+    }
     Rectangle2D printedItemBounds = getItemsBounds(g, printedItems);
     if (printedItemBounds != null) {
       double imageableX = pageFormat.getImageableX();
@@ -2020,9 +2061,11 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
       float columnIndex;
       int pagesPerRow;
       int pagesPerColumn;
-      if (this.home.getPrint() == null || this.home.getPrint().getPlanScale() == null) {
-        // Compute a scale that ensures the plan will fill the component if plan scale is null
-        printScale = getPrintPreferredScale(g, pageFormat) * LengthUnit.centimeterToInch(72);
+      Float requestedScale = this.home.getPrint() == null ? null : this.home.getPrint().getPlanScale();
+      if (fitOnPage || requestedScale == null) {
+        float scale = getPrintPreferredScale(pageFormat, printedItems, printedItemBounds);
+        printScale = (requestedScale == null ? scale : Math.min(requestedScale, scale))
+            * LengthUnit.centimeterToInch(72);
         if (pageIndex > 0) {
           return NO_SUCH_PAGE;
         }
@@ -2032,7 +2075,7 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
         columnIndex = 0;
       } else {
         // Apply print scale to paper size expressed in 1/72nds of an inch
-        printScale = this.home.getPrint().getPlanScale().floatValue() * LengthUnit.centimeterToInch(72);
+        printScale = requestedScale * LengthUnit.centimeterToInch(72);
         pagesPerRow = (int)(printedItemBounds.getWidth() * printScale / imageableWidth);
         if (printedItemBounds.getWidth() * printScale != imageableWidth) {
           pagesPerRow++;
@@ -2066,12 +2109,13 @@ public class PlanComponent extends JComponent implements PlanView, Scrollable, P
         // Print component contents
         paintContent(g2D, printScale, PaintMode.PRINT);
       } catch (InterruptedIOException ex) {
-        // Ignore exception because it may happen only in EXPORT paint mode 
-      }   
-      g2D.dispose();
+        // This exception can only occur in export mode.
+      } finally {
+        g2D.dispose();
+      }
       return PAGE_EXISTS;
     } else {
-      return NO_SUCH_PAGE;
+      return fitOnPage ? PAGE_EXISTS : NO_SUCH_PAGE;
     }
   }
   

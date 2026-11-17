@@ -21,6 +21,7 @@ package com.eteks.sweethome3d.swing;
 
 import java.awt.Color;
 import java.awt.Dimension;
+import java.awt.EventQueue;
 import java.awt.Font;
 import java.awt.FontMetrics;
 import java.awt.Graphics;
@@ -42,12 +43,13 @@ import java.util.HashSet;
 import java.util.MissingResourceException;
 import java.util.ResourceBundle;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
 import javax.swing.JComponent;
 import javax.swing.JLabel;
 
 import com.eteks.sweethome3d.model.Home;
-import com.eteks.sweethome3d.model.HomePieceOfFurniture;
 import com.eteks.sweethome3d.model.HomePrint;
 import com.eteks.sweethome3d.model.LengthUnit;
 import com.eteks.sweethome3d.model.Level;
@@ -187,6 +189,37 @@ public class HomePrintableComponent extends JComponent implements Printable {
       throw new InterruptedPrinterException();
     }
     
+    // Rendering may temporarily change the selected level and update Swing views.
+    if (!EventQueue.isDispatchThread()) {
+      CompletableFuture<Integer> printTask = CompletableFuture.supplyAsync(() -> {
+        try {
+          return print(g, pageFormat, page);
+        } catch (PrinterException ex) {
+          throw new CompletionException(ex);
+        }
+      }, EventQueue::invokeLater);
+      try {
+        // Finish rendering and restoring view state before the caller releases the graphics.
+        int pageExists = printTask.join();
+        if (Thread.interrupted()) {
+          throw new InterruptedPrinterException("Print interrupted");
+        }
+        return pageExists;
+      } catch (CompletionException ex) {
+        Throwable cause = ex.getCause();
+        if (cause instanceof PrinterException) {
+          throw (PrinterException)cause;
+        }
+        if (cause instanceof RuntimeException) {
+          throw (RuntimeException)cause;
+        }
+        if (cause instanceof Error) {
+          throw (Error)cause;
+        }
+        throw new IllegalStateException(cause);
+      }
+    }
+
     Graphics2D g2D = (Graphics2D)g;
     g2D.setFont(this.defaultFont);
     g2D.setColor(Color.WHITE);
@@ -278,10 +311,13 @@ public class HomePrintableComponent extends JComponent implements Printable {
         if (homeName == null) {
           homeName = "";
         }
-        String levelName = "";
-        if (this.home.getSelectedLevel() != null) {
-          levelName = this.home.getSelectedLevel().getName();
+        Level level = homePrint.isPlanPrinted() && page >= this.furniturePageCount
+            ? PlanComponent.getPrintLevel(this.home, page - this.furniturePageCount)
+            : null;
+        if (level == null) {
+          level = this.home.getSelectedLevel();
         }
+        String levelName = level != null ? level.getName() : "";
         String homePresentationName = this.controller.getContentManager().getPresentationName(
              homeName, ContentManager.ContentType.SWEET_HOME_3D);
         Object [] variableValues = new Object [] {
@@ -345,32 +381,7 @@ public class HomePrintableComponent extends JComponent implements Printable {
     View furnitureView = this.controller.getFurnitureController().getView();
     if (furnitureView != null 
         && (homePrint == null || homePrint.isFurniturePrinted())) {
-      FurnitureTable furnitureTable = null;
-      final FurnitureTable.FurnitureFilter furnitureFilter;
-      if (furnitureView instanceof FurnitureTable
-          && (homePrint == null
-              || homePrint.isPlanPrinted()
-              || homePrint.isView3DPrinted())) {
-        final Level selectedLevel = home.getSelectedLevel();
-        furnitureTable = (FurnitureTable)furnitureView;
-        furnitureFilter = furnitureTable.getFurnitureFilter();
-        furnitureTable.setFurnitureFilter(new FurnitureTable.FurnitureFilter() {
-            public boolean include(Home home, HomePieceOfFurniture piece) {
-              // Print only furniture at selected level when the plan or the 3D view is printed
-              return (furnitureFilter == null || furnitureFilter.include(home, piece))
-                  && piece.isAtLevel(selectedLevel)
-                  && (piece.getLevel() == null || piece.getLevel().isViewable());
-            }
-          });
-      } else {
-        furnitureFilter = null;
-      }
-      // Try to print next furniture view page      
       pageExists = ((Printable)furnitureView).print(g2D, pageFormat, page);
-      if (furnitureTable != null) {
-        // Restore previous filter
-        ((FurnitureTable)furnitureView).setFurnitureFilter(furnitureFilter);
-      }
       if (pageExists == PAGE_EXISTS
           && !this.printablePages.contains(page)) {
         this.printablePages.add(page);
